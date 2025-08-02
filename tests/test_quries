@@ -1,1 +1,10 @@
 
+--test for alter procedure on addproduct
+EXEC AddProduct '','Test',-1,-5;--should fail
+EXEC AddProduct 'Headphones','Accessories',79.99,100;--should succeed
+SELECT * FROM Products WHERE ProductName = 'Headphones';
+
+--test for alter trigger on UpdateStocckOnOrder
+INSERT INTO OrderDetails (OrderDetailId, OrderId, ProductId, Quantity, UnitPrice)
+VALUES (4, 1, 1, 100, 999.99); -- Should fail (Laptop stock = 50)
+SELECT ProductName, StockLevel FROM Products WHERE ProductId = 1;
