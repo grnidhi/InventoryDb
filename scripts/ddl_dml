@@ -1,0 +1,204 @@
+IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'InventoryDB')
+BEGIN
+    CREATE DATABASE InventoryDB;
+END
+GO
+
+USE InventoryDB
+GO
+
+-- Drop existing tables if they exist (to avoid primary key conflicts on re-run)
+DROP TABLE IF EXISTS OrderDetails;
+DROP TABLE IF EXISTS Orders;
+DROP TABLE IF EXISTS Products;
+DROP TABLE IF EXISTS Suppliers;
+GO
+
+-- Creating tables
+CREATE TABLE Suppliers
+(
+    SupplierId INT PRIMARY KEY,
+    SupplierName VARCHAR(100) NOT NULL,
+    ContactEmail VARCHAR(100),
+    City VARCHAR(50)
+);
+
+CREATE TABLE Products
+(
+    ProductId INT PRIMARY KEY,
+    ProductName VARCHAR(100) NOT NULL,
+    Category VARCHAR(50),
+    Price DECIMAL(10,2) NOT NULL,
+    StockLevel INT NOT NULL
+);
+
+CREATE TABLE Orders
+(
+    OrderId INT PRIMARY KEY,
+    SupplierId INT,
+    OrderDate DATE NOT NULL,
+    TotalAmount DECIMAL(10,2),
+    FOREIGN KEY (SupplierId) REFERENCES Suppliers(SupplierId)
+);
+
+CREATE TABLE OrderDetails
+(
+    OrderDetailId INT PRIMARY KEY,
+    OrderId INT,
+    ProductId INT,
+    Quantity INT NOT NULL,
+    UnitPrice DECIMAL(10,2) NOT NULL,
+    FOREIGN KEY (OrderId) REFERENCES Orders(OrderId),
+    FOREIGN KEY (ProductId) REFERENCES Products(ProductId)
+);
+GO
+
+-- Inserting Sample Data
+INSERT INTO Suppliers (SupplierId, SupplierName, ContactEmail, City) VALUES 
+    (1, 'Acme Corp', 'sales@acme.com', 'New York'),
+    (2, 'Beta Supplies', 'info@beta.com', 'Chicago'),
+    (3, 'Gamma Traders', 'contact@gamma.com', 'Miami');
+
+INSERT INTO Products (ProductId, ProductName, Category, Price, StockLevel) VALUES 
+    (1, 'Laptop', 'Electronics', 999.99, 50),
+    (2, 'Mouse', 'Accessories', 29.99, 200),
+    (3, 'Desk', 'Furniture', 149.99, 30),
+    (4, 'Monitor', 'Electronics', 199.99, 80),
+    (5, 'Keyboard', 'Accessories', 49.99, 150);
+
+INSERT INTO Orders (OrderId, SupplierId, OrderDate, TotalAmount) VALUES 
+    (1, 1, '2025-07-01', 2999.97),
+    (2, 2, '2025-07-05', 599.98),
+    (3, 3, '2025-07-10', 149.99);
+
+INSERT INTO OrderDetails (OrderDetailId, OrderId, ProductId, Quantity, UnitPrice) VALUES 
+    (1, 1, 1, 3, 999.99),
+    (2, 2, 4, 2, 199.99),
+    (3, 3, 3, 1, 149.99);
+GO
+
+-- Stored Procedure: Add Product (only the updated version)
+ALTER PROCEDURE AddProduct
+    @ProductName VARCHAR(100),
+    @Category VARCHAR(50),
+    @Price DECIMAL(10,2),
+    @StockLevel INT
+AS
+BEGIN
+    IF @Price <= 0
+        THROW 50001, 'Price must be greater than 0.', 1;
+    IF @StockLevel < 0
+        THROW 50002, 'StockLevel must be non-negative', 1;
+    IF @ProductName IS NULL OR @ProductName = ''
+        THROW 50003, 'ProductName cannot be empty.', 1;
+    
+    INSERT INTO Products (ProductName, Category, Price, StockLevel)
+    VALUES (@ProductName, @Category, @Price, @StockLevel);
+END;
+GO
+
+-- Stored Procedure: GetStockValue
+CREATE PROCEDURE GetStockValue
+AS
+BEGIN
+    SELECT SUM(Price * StockLevel) AS TotalStockValue
+    FROM Products;
+END;
+GO
+
+-- Stored Procedure: GetCategorySalesRank
+CREATE PROCEDURE GetCategorySalesRank
+AS
+BEGIN
+    WITH SalesByProduct AS
+    (
+        SELECT
+        p.ProductId,
+        p.ProductName,
+        p.Category,
+        SUM(od.Quantity * od.UnitPrice) AS TotalSalesValue
+        FROM Products p
+        JOIN OrderDetails od ON p.ProductId = od.ProductId
+        GROUP BY p.ProductId, p.ProductName, p.Category
+    )
+    SELECT 
+        ProductName,
+        Category,
+        TotalSalesValue,
+        RANK() OVER (PARTITION BY Category ORDER BY TotalSalesValue DESC) AS SalesRank
+    FROM SalesByProduct
+    ORDER BY Category, SalesRank;
+END;
+GO
+
+CREATE PROCEDURE GetTopProductsByMonth
+AS
+BEGIN
+    WITH MonthlySales AS (
+        SELECT 
+            p.ProductName,
+            p.Category,
+            MONTH(o.OrderDate) AS SaleMonth,
+            YEAR(o.OrderDate) AS SaleYear,
+            SUM(od.Quantity * od.UnitPrice) AS MonthlySalesValue,
+            RANK() OVER (PARTITION BY MONTH(o.OrderDate), YEAR(o.OrderDate) ORDER BY SUM(od.Quantity * od.UnitPrice) DESC) AS SalesRank
+        FROM Products p
+        JOIN OrderDetails od ON p.ProductId = od.ProductId
+        JOIN Orders o ON od.OrderId = o.OrderId
+        GROUP BY p.ProductName, p.Category, MONTH(o.OrderDate), YEAR(o.OrderDate)
+    )
+    SELECT ProductName, Category, SaleMonth, SaleYear, MonthlySalesValue, SalesRank
+    FROM MonthlySales
+    WHERE SalesRank = 1
+    ORDER BY SaleYear, SaleMonth;
+END;
+GO
+
+-- View: LowStockProducts
+CREATE VIEW LowStockProducts AS
+SELECT
+    ProductId,
+    ProductName,
+    Category,
+    StockLevel
+FROM Products
+WHERE StockLevel < 10;
+GO
+
+-- View: SupplierOrderSummary
+CREATE VIEW SupplierOrderSummary AS
+SELECT
+    s.SupplierName,
+    COUNT(o.OrderId) AS TotalOrders,
+    SUM(o.TotalAmount) AS TotalOrderValue
+FROM Suppliers s
+LEFT JOIN Orders o ON s.SupplierId = o.SupplierId
+GROUP BY s.SupplierName;
+GO
+
+-- Trigger: UpdateStockOnOrder (only the updated version)
+CREATE TRIGGER UpdateStockOnOrder
+ON OrderDetails
+AFTER INSERT
+AS
+BEGIN
+    BEGIN TRY
+        BEGIN TRANSACTION;
+        UPDATE p
+        SET p.StockLevel = p.StockLevel - i.Quantity
+        FROM Products p
+        INNER JOIN inserted i ON p.ProductId = i.ProductId;
+        IF EXISTS (SELECT 1 FROM Products WHERE StockLevel < 0)
+        BEGIN
+            ROLLBACK;
+            THROW 50004, 'Stock level cannot be negative.', 1;
+        END
+        COMMIT;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0
+            ROLLBACK;
+        THROW;
+    END CATCH;
+END;
+GO
